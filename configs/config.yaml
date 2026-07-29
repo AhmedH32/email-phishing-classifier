@@ -1,28 +1,8 @@
-# ==========================================
-# Email Phishing Classifier Configuration
-# ==========================================
-
-data:
-  local_parquet: "data/unified_phishing_dataset.parquet"
-  kaggle_parquet: "/kaggle/input/datasets/ahmedhmoustafa/phishing-unified-parquet/unified_phishing_dataset.parquet"
-  test_size: 0.2
-  random_state: 42
-
 deberta:
   model_name: "microsoft/deberta-v3-small"
   max_length: 512
   stride: 256
-  batch_size: 8
+  batch_size: 32
   epochs: 3
   learning_rate: 2.0e-5
   weight_decay: 0.01
-
-xgboost:
-  n_estimators: 300
-  max_depth: 6
-  learning_rate: 0.05
-  subsample: 0.8
-  colsample_bytree: 0.8
-  random_state: 42
-
-active_experiment: "exp1_deberta_text_only"
