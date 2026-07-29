@@ -4,10 +4,10 @@ from transformers import AutoConfig, AutoModel
 
 
 class DebertaSlidingWindowClassifier(nn.Module):
-    """DeBERTa-v3 architecture with Packed Chunk Processing & Sample-wise Max-Pooling.
+    """DeBERTa-v3 architecture with Chunk Micro-Batching & Sample-wise Max-Pooling.
 
-    Enforces FP32 precision across backbone and classification head to prevent
-    dtype mismatches on Kaggle GPU environments.
+    Packs valid chunks without zero-padding waste and processes them in sub-batches
+    (max 16 chunks per CUDA call) to guarantee VRAM usage remains bounded.
     """
 
     def __init__(
@@ -15,15 +15,16 @@ class DebertaSlidingWindowClassifier(nn.Module):
         model_name: str = "microsoft/deberta-v3-small",
         num_classes: int = 2,
         dropout: float = 0.2,
+        max_chunk_sub_batch: int = 16,
     ):
         super().__init__()
         self.config = AutoConfig.from_pretrained(model_name)
-        # Force backbone weights to FP32 float precision
         self.deberta = AutoModel.from_pretrained(
             model_name, config=self.config
         ).float()
         self.drop = nn.Dropout(dropout)
         self.classifier = nn.Linear(self.config.hidden_size, num_classes)
+        self.max_chunk_sub_batch = max_chunk_sub_batch
 
     def forward(
         self,
@@ -33,15 +34,21 @@ class DebertaSlidingWindowClassifier(nn.Module):
         batch_size: int,
         return_embeddings: bool = False,
     ) -> torch.Tensor:
-        # Single parallel forward pass over valid chunks
-        outputs = self.deberta(
-            input_ids=input_ids, attention_mask=attention_mask
-        )
+        total_chunks = input_ids.size(0)
+        cls_embeddings_list = []
 
-        # Extract [CLS] embeddings and cast explicitly to float32
-        cls_embeddings = outputs.last_hidden_state[:, 0, :].float()
+        # Slice packed chunks into sub-batches of max 16 to keep VRAM strictly bounded
+        for i in range(0, total_chunks, self.max_chunk_sub_batch):
+            sub_ids = input_ids[i : i + self.max_chunk_sub_batch]
+            sub_mask = attention_mask[i : i + self.max_chunk_sub_batch]
 
-        # Max-Pooling across chunks per email sample
+            outputs = self.deberta(input_ids=sub_ids, attention_mask=sub_mask)
+            sub_cls = outputs.last_hidden_state[:, 0, :].float()
+            cls_embeddings_list.append(sub_cls)
+
+        cls_embeddings = torch.cat(cls_embeddings_list, dim=0)
+
+        # Max-Pooling across chunks for each email sample in the batch
         pooled_embeddings = []
         for b in range(batch_size):
             sample_mask = batch_indices == b
@@ -60,4 +67,4 @@ class DebertaSlidingWindowClassifier(nn.Module):
 
 
 if __name__ == "__main__":
-    print("Packed Chunk DeBERTa FP32 model ready!")
+    print("Micro-Batched DeBERTa FP32 model ready!")
