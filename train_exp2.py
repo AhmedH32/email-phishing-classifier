@@ -151,6 +151,7 @@ def main():
             y_true=y_val,
             y_pred=val_preds,
             y_prob=val_probs,
+            exp_name="exp2",  # <-- ADD THIS PARAMETER
         )
 
 

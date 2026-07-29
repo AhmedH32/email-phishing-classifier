@@ -52,16 +52,18 @@ def save_experiment_artifacts(
     y_true: np.ndarray,
     y_pred: np.ndarray,
     y_prob: np.ndarray,
+    exp_name: str = "exp1",
 ) -> None:
     """Saves plots and structured JSON results for ablation study documentation."""
     os.makedirs(output_dir, exist_ok=True)
 
     # 1. Save JSON Metrics Log
     metrics_payload = {
+        "experiment": exp_name,
         "final_metrics": final_metrics,
         "history": history,
     }
-    json_path = os.path.join(output_dir, "metrics_exp1.json")
+    json_path = os.path.join(output_dir, f"metrics_{exp_name}.json")
     with open(json_path, "w") as f:
         json.dump(metrics_payload, f, indent=4)
     print(f"📄 Metrics log saved to {json_path}")
@@ -114,7 +116,7 @@ def save_experiment_artifacts(
                 weight="bold",
             )
 
-    plt.title("Confusion Matrix (Exp 1)", pad=20)
+    plt.title(f"Confusion Matrix ({exp_name.upper()})", pad=20)
     fig.colorbar(cax)
     ax.set_xticks([0, 1])
     ax.set_yticks([0, 1])
@@ -136,14 +138,14 @@ def save_experiment_artifacts(
         tpr,
         color="#d62728",
         lw=2,
-        label=f"DeBERTa (AUC = {final_metrics['roc_auc']:.4f})",
+        label=f"Model (AUC = {final_metrics['roc_auc']:.4f})",
     )
     ax.plot([0, 1], [0, 1], color="gray", lw=1, linestyle="--")
     ax.set_xlim([0.0, 1.0])
     ax.set_ylim([0.0, 1.05])
     ax.set_xlabel("False Positive Rate")
     ax.set_ylabel("True Positive Rate")
-    ax.set_title("Receiver Operating Characteristic (ROC) Curve")
+    ax.set_title(f"ROC Curve ({exp_name.upper()})")
     ax.legend(loc="lower right")
     ax.grid(True, linestyle="--", alpha=0.5)
     plt.tight_layout()
