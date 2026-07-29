@@ -1,4 +1,4 @@
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional
 
 import torch
 from torch.utils.data import Dataset
@@ -8,22 +8,24 @@ from transformers import AutoTokenizer
 class SlidingWindowPhishingDataset(Dataset):
     """PyTorch Dataset that splits long email bodies into overlapping sliding windows
 
-    (max_length=512, stride=256) for DeBERTa-v3 processing.
+    (max_length=512, stride=256) with a safety cap of max 4 chunks per email.
     """
 
     def __init__(
         self,
         texts: List[str],
-        labels: List[int] = None,
+        labels: Optional[List[int]] = None,
         tokenizer_name: str = "microsoft/deberta-v3-small",
         max_length: int = 512,
         stride: int = 256,
+        max_chunks_per_sample: int = 4,
     ):
         self.texts = list(texts)
         self.labels = list(labels) if labels is not None else None
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
         self.max_length = max_length
         self.stride = stride
+        self.max_chunks_per_sample = max_chunks_per_sample
 
     def __len__(self) -> int:
         return len(self.texts)
@@ -42,11 +44,15 @@ class SlidingWindowPhishingDataset(Dataset):
             return_tensors="pt",
         )
 
+        # Cap max chunks per sample to prevent outlier raw log dumps from blowing up VRAM
+        input_ids = encoding["input_ids"][: self.max_chunks_per_sample]
+        attention_mask = encoding["attention_mask"][
+            : self.max_chunks_per_sample
+        ]
+
         item = {
-            "input_ids": encoding[
-                "input_ids"
-            ],  # Shape: [num_chunks_for_email, 512]
-            "attention_mask": encoding["attention_mask"],
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
         }
 
         if self.labels is not None:
@@ -58,38 +64,28 @@ class SlidingWindowPhishingDataset(Dataset):
 def packed_sliding_window_collate_fn(
     batch: List[Dict[str, torch.Tensor]],
 ) -> Dict[str, torch.Tensor]:
-    """Packs ONLY valid chunks across the batch without padding zero chunks.
-
-    Eliminates wasted compute and prevents CUDA memory spikes on long-tail inputs.
-    """
+    """Packs valid chunks across the batch without zero-padding waste."""
     all_input_ids = []
     all_attention_masks = []
     batch_indices = []
     labels = []
 
     for sample_idx, item in enumerate(batch):
-        input_ids = item["input_ids"]  # [num_chunks, seq_len]
-        attention_mask = item["attention_mask"]  # [num_chunks, seq_len]
+        input_ids = item["input_ids"]
+        attention_mask = item["attention_mask"]
         num_chunks = input_ids.size(0)
 
         all_input_ids.append(input_ids)
         all_attention_masks.append(attention_mask)
-        # Track which sample index each chunk belongs to
         batch_indices.extend([sample_idx] * num_chunks)
 
         if "label" in item:
             labels.append(item["label"])
 
     collated = {
-        "input_ids": torch.cat(
-            all_input_ids, dim=0
-        ),  # [Total_Real_Chunks, seq_len]
-        "attention_mask": torch.cat(
-            all_attention_masks, dim=0
-        ),  # [Total_Real_Chunks, seq_len]
-        "batch_indices": torch.tensor(
-            batch_indices, dtype=torch.long
-        ),  # [Total_Real_Chunks]
+        "input_ids": torch.cat(all_input_ids, dim=0),
+        "attention_mask": torch.cat(all_attention_masks, dim=0),
+        "batch_indices": torch.tensor(batch_indices, dtype=torch.long),
         "batch_size": len(batch),
     }
 
