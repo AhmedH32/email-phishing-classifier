@@ -1,7 +1,7 @@
 import os
 import sys
 
-# Ensure repository root is on sys.path for Kaggle / subshell execution
+# Ensure repository root is on sys.path
 sys.path.append(os.path.abspath(os.path.dirname(__file__)))
 
 import numpy as np
@@ -54,7 +54,7 @@ def main():
     print(f"  ├─ Training samples:   {len(train_df)}")
     print(f"  └─ Validation samples: {len(val_df)}")
 
-    # 4. Instantiate Datasets & DataLoaders with Packed Chunk Collate
+    # 4. DataLoaders with Packed Chunk Collate
     cfg_deb = config["deberta"]
 
     train_dataset = SlidingWindowPhishingDataset(
@@ -106,9 +106,7 @@ def main():
     )
     criterion = nn.CrossEntropyLoss()
 
-    scaler = torch.amp.GradScaler("cuda", enabled=(device.type == "cuda"))
-
-    # 6. Training Loop
+    # 6. Training Loop (Standard FP32 for DeBERTa Stability)
     epochs = cfg_deb["epochs"]
     best_f1 = 0.0
 
@@ -127,18 +125,16 @@ def main():
 
             optimizer.zero_grad()
 
-            with torch.amp.autocast("cuda", enabled=(device.type == "cuda")):
-                logits = model(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    batch_indices=batch_indices,
-                    batch_size=batch_size,
-                )
-                loss = criterion(logits, labels)
+            logits = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                batch_indices=batch_indices,
+                batch_size=batch_size,
+            )
+            loss = criterion(logits, labels)
 
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
+            loss.backward()
+            optimizer.step()
 
             running_loss += loss.item()
             pbar.set_postfix({"batch_loss": f"{loss.item():.4f}"})
@@ -158,21 +154,20 @@ def main():
                 labels = batch["label"]
                 batch_size = batch["batch_size"]
 
-                with torch.amp.autocast("cuda", enabled=(device.type == "cuda")):
-                    logits = model(
-                        input_ids=input_ids,
-                        attention_mask=attention_mask,
-                        batch_indices=batch_indices,
-                        batch_size=batch_size,
-                    )
-                    probs = torch.softmax(logits, dim=-1)[:, 1]
-                    preds = torch.argmax(logits, dim=-1)
+                logits = model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    batch_indices=batch_indices,
+                    batch_size=batch_size,
+                )
+                probs = torch.softmax(logits, dim=-1)[:, 1]
+                preds = torch.argmax(logits, dim=-1)
 
                 val_preds.extend(preds.cpu().numpy())
                 val_probs.extend(probs.cpu().numpy())
                 val_targets.extend(labels.numpy())
 
-        # 8. Compute Metrics & Print Summary
+        # 8. Metrics & Checkpointing
         metrics = compute_evaluation_metrics(
             y_true=np.array(val_targets),
             y_pred=np.array(val_preds),
@@ -183,7 +178,6 @@ def main():
             f"Exp 1: DeBERTa Text-Only (Epoch {epoch + 1})", metrics
         )
 
-        # 9. Save Best Model Checkpoint
         if metrics["f1"] > best_f1:
             best_f1 = metrics["f1"]
             os.makedirs("models", exist_ok=True)
