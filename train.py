@@ -79,12 +79,16 @@ def main():
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
+        num_workers=2,
+        pin_memory=True,
         collate_fn=packed_sliding_window_collate_fn,
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
+        num_workers=2,
+        pin_memory=True,
         collate_fn=packed_sliding_window_collate_fn,
     )
 
@@ -101,20 +105,40 @@ def main():
     criterion = nn.CrossEntropyLoss()
 
     best_f1 = 0.0
+    start_epoch = 0
     history = {"train_loss": [], "val_loss": [], "val_f1": []}
+
+    # -------------------------------------------------------------------------
+    # Auto-Resume Checkpoint Engine
+    # -------------------------------------------------------------------------
+    ckpt_dir = config["outputs"]["model_dir"]
+    os.makedirs(ckpt_dir, exist_ok=True)
+    latest_ckpt_path = os.path.join(ckpt_dir, "latest_checkpoint_exp1.pt")
+
+    if os.path.exists(latest_ckpt_path) and not is_dry_run:
+        checkpoint = torch.load(latest_ckpt_path, map_location=device)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        start_epoch = checkpoint["epoch"]
+        best_f1 = checkpoint["best_f1"]
+        history = checkpoint["history"]
+        print(
+            f"🔄 Resuming Experiment 1 from Epoch {start_epoch + 1}/{epochs} (Best F1 so far: {best_f1:.4f})"
+        )
+
     latest_val_targets, latest_val_preds, latest_val_probs = [], [], []
     latest_metrics = {}
 
-    for epoch in range(epochs):
+    for epoch in range(start_epoch, epochs):
         model.train()
         running_loss = 0.0
 
-        pbar = tqdm(train_loader, desc=f"Exp 1 Epoch {epoch + 1}")
+        pbar = tqdm(train_loader, desc=f"Exp 1 Epoch {epoch + 1}/{epochs}")
         for batch in pbar:
-            input_ids = batch["input_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
-            batch_indices = batch["batch_indices"].to(device)
-            labels = batch["label"].to(device)
+            input_ids = batch["input_ids"].to(device, non_blocking=True)
+            attention_mask = batch["attention_mask"].to(device, non_blocking=True)
+            batch_indices = batch["batch_indices"].to(device, non_blocking=True)
+            labels = batch["label"].to(device, non_blocking=True)
 
             optimizer.zero_grad()
             logits = model(
@@ -139,10 +163,10 @@ def main():
 
         with torch.no_grad():
             for batch in val_loader:
-                input_ids = batch["input_ids"].to(device)
-                attention_mask = batch["attention_mask"].to(device)
-                batch_indices = batch["batch_indices"].to(device)
-                labels = batch["label"].to(device)
+                input_ids = batch["input_ids"].to(device, non_blocking=True)
+                attention_mask = batch["attention_mask"].to(device, non_blocking=True)
+                batch_indices = batch["batch_indices"].to(device, non_blocking=True)
+                labels = batch["label"].to(device, non_blocking=True)
 
                 logits = model(
                     input_ids=input_ids,
@@ -178,14 +202,25 @@ def main():
         )
         latest_metrics = metrics
 
+        # Save latest epoch checkpoint for auto-resuming
+        if not is_dry_run:
+            torch.save(
+                {
+                    "epoch": epoch + 1,
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "best_f1": max(best_f1, metrics["f1"]),
+                    "history": history,
+                },
+                latest_ckpt_path,
+            )
+
+        # Save best model checkpoint
         if metrics["f1"] >= best_f1 and not is_dry_run:
             best_f1 = metrics["f1"]
-            os.makedirs(config["outputs"]["model_dir"], exist_ok=True)
             torch.save(
                 model.state_dict(),
-                os.path.join(
-                    config["outputs"]["model_dir"], "best_deberta_exp1.pt"
-                ),
+                os.path.join(ckpt_dir, "best_deberta_exp1.pt"),
             )
 
     if not is_dry_run:
@@ -196,6 +231,7 @@ def main():
             y_true=latest_val_targets,
             y_pred=latest_val_preds,
             y_prob=latest_val_probs,
+            exp_name="exp1",
         )
 
 

@@ -26,15 +26,30 @@ from src.utils.metrics import (
 from train_exp2 import extract_header_structural_features
 
 
+def load_model_weights_safely(model, ckpt_path, device):
+    """Loads state dict safely regardless of key prefixes."""
+    state_dict = torch.load(ckpt_path, map_location=device)
+    if "model_state_dict" in state_dict:
+        state_dict = state_dict["model_state_dict"]
+
+    clean_state_dict = {}
+    for k, v in state_dict.items():
+        key = k[7:] if k.startswith("module.") else k
+        clean_state_dict[key] = v
+
+    model.load_state_dict(clean_state_dict)
+    return model
+
+
 def extract_cls_embeddings(model, loader, device, is_dry_run=False):
     """Extracts 768-dim pooled [CLS] representations from DeBERTa backbone."""
     model.eval()
     embeddings_list = []
     with torch.no_grad():
         for batch in tqdm(loader, desc="Extracting DeBERTa [CLS] Embeddings"):
-            input_ids = batch["input_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
-            batch_indices = batch["batch_indices"].to(device)
+            input_ids = batch["input_ids"].to(device, non_blocking=True)
+            attention_mask = batch["attention_mask"].to(device, non_blocking=True)
+            batch_indices = batch["batch_indices"].to(device, non_blocking=True)
             batch_size = batch["batch_size"]
 
             pooled_emb = model(
@@ -77,7 +92,6 @@ def main():
         stratify=df["label"],
     )
 
-    # 1. Load DeBERTa Backbone
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     cfg_deb = config["deberta"]
     deb_model = DebertaSlidingWindowClassifier(
@@ -88,10 +102,9 @@ def main():
         config["outputs"]["model_dir"], "best_deberta_exp1.pt"
     )
     if os.path.exists(ckpt_path):
-        deb_model.load_state_dict(torch.load(ckpt_path, map_location=device))
-        print(f"✅ Loaded DeBERTa weights from {ckpt_path}")
+        deb_model = load_model_weights_safely(deb_model, ckpt_path, device)
+        print(f"✅ Loaded trained DeBERTa weights from {ckpt_path}")
 
-    # 2. Extract 768-dim Text Embeddings
     train_ds = SlidingWindowPhishingDataset(
         texts=train_df["full_text"].values,
         labels=train_df["label"].values,
@@ -107,12 +120,16 @@ def main():
         train_ds,
         batch_size=cfg_deb["batch_size"],
         shuffle=False,
+        num_workers=2,
+        pin_memory=True,
         collate_fn=packed_sliding_window_collate_fn,
     )
     val_loader = DataLoader(
         val_ds,
         batch_size=cfg_deb["batch_size"],
         shuffle=False,
+        num_workers=2,
+        pin_memory=True,
         collate_fn=packed_sliding_window_collate_fn,
     )
 
@@ -125,7 +142,6 @@ def main():
         train_df = train_df.iloc[: len(train_cls)]
         val_df = val_df.iloc[: len(val_cls)]
 
-    # 3. Extract 12-dim Header Structural Features
     X_train_hdr = extract_header_structural_features(
         train_df["full_text"]
     ).values
@@ -134,7 +150,6 @@ def main():
     y_train = train_df["label"].values
     y_val = val_df["label"].values
 
-    # 4. Early Fusion: Joint Representation (768 text dims + 12 header dims = 780 total features)
     X_train_fused = np.hstack([train_cls, X_train_hdr])
     X_val_fused = np.hstack([val_cls, X_val_hdr])
 
@@ -142,7 +157,6 @@ def main():
         f"🧬 Early Fusion Feature Shape: {X_train_fused.shape} (768 Text + 12 Header Dims)"
     )
 
-    # 5. Train Joint XGBoost Classifier
     cfg_xgb = config["xgboost"]
     fusion_xgb = xgb.XGBClassifier(
         n_estimators=10 if is_dry_run else cfg_xgb["n_estimators"],
