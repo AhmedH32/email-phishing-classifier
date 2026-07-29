@@ -1,0 +1,11 @@
+# Datasets and Data Folders
+data/
+*.csv
+*.parquet
+
+# Python Cache and Environments
+__pycache__/
+*.py[cod]
+.env
+venv/
+.venv/
