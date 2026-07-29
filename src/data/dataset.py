@@ -31,7 +31,6 @@ class SlidingWindowPhishingDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         text = str(self.texts[idx])
 
-        # Tokenize with sliding window chunking
         encoding = self.tokenizer(
             text,
             truncation=True,
@@ -43,13 +42,11 @@ class SlidingWindowPhishingDataset(Dataset):
             return_tensors="pt",
         )
 
-        # encoding['input_ids'] shape: [num_chunks, max_length]
         item = {
-            "input_ids": encoding["input_ids"],
+            "input_ids": encoding[
+                "input_ids"
+            ],  # Shape: [num_chunks_for_email, 512]
             "attention_mask": encoding["attention_mask"],
-            "num_chunks": torch.tensor(
-                encoding["input_ids"].size(0), dtype=torch.long
-            ),
         }
 
         if self.labels is not None:
@@ -58,5 +55,45 @@ class SlidingWindowPhishingDataset(Dataset):
         return item
 
 
-if __name__ == "__main__":
-    print("Dataset module loaded cleanly!")
+def packed_sliding_window_collate_fn(
+    batch: List[Dict[str, torch.Tensor]],
+) -> Dict[str, torch.Tensor]:
+    """Packs ONLY valid chunks across the batch without padding zero chunks.
+
+    Eliminates wasted compute and prevents CUDA memory spikes on long-tail inputs.
+    """
+    all_input_ids = []
+    all_attention_masks = []
+    batch_indices = []
+    labels = []
+
+    for sample_idx, item in enumerate(batch):
+        input_ids = item["input_ids"]  # [num_chunks, seq_len]
+        attention_mask = item["attention_mask"]  # [num_chunks, seq_len]
+        num_chunks = input_ids.size(0)
+
+        all_input_ids.append(input_ids)
+        all_attention_masks.append(attention_mask)
+        # Track which sample index each chunk belongs to
+        batch_indices.extend([sample_idx] * num_chunks)
+
+        if "label" in item:
+            labels.append(item["label"])
+
+    collated = {
+        "input_ids": torch.cat(
+            all_input_ids, dim=0
+        ),  # [Total_Real_Chunks, seq_len]
+        "attention_mask": torch.cat(
+            all_attention_masks, dim=0
+        ),  # [Total_Real_Chunks, seq_len]
+        "batch_indices": torch.tensor(
+            batch_indices, dtype=torch.long
+        ),  # [Total_Real_Chunks]
+        "batch_size": len(batch),
+    }
+
+    if labels:
+        collated["label"] = torch.stack(labels, dim=0)
+
+    return collated

@@ -5,7 +5,7 @@
 # Data Paths & Settings
 data:
   local_parquet: "data/unified_phishing_dataset.parquet"
-  kaggle_parquet: "/kaggle/input/phishing-unified-parquet/unified_phishing_dataset.parquet"
+  kaggle_parquet: "/kaggle/input/datasets/ahmedhmoustafa/phishing-unified-parquet/unified_phishing_dataset.parquet"
   test_size: 0.2
   random_state: 42
 
@@ -28,10 +28,4 @@ xgboost:
   colsample_bytree: 0.8
   random_state: 42
 
-# Active Ablation Target
-# Options:
-#  - "exp1_deberta_text_only"
-#  - "exp2_xgb_headers_only"
-#  - "exp3_late_fusion"
-#  - "exp4_early_fusion"
 active_experiment: "exp1_deberta_text_only"

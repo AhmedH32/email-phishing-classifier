@@ -4,10 +4,10 @@ from transformers import AutoConfig, AutoModel
 
 
 class DebertaSlidingWindowClassifier(nn.Module):
-    """DeBERTa-v3 Small architecture with Flattened Parallel Chunk Pass & Max-Pooling.
+    """DeBERTa-v3 architecture with Packed Chunk Processing & Sample-wise Max-Pooling.
 
-    Flattens batch and chunk dimensions into [batch_size * num_chunks, seq_len]
-    to execute a single parallel forward pass on GPU for maximum throughput.
+    Executes a single parallel GPU forward pass on ONLY valid chunks across the batch,
+    and aggregates chunk representations per sample via Max-Pooling.
     """
 
     def __init__(
@@ -28,31 +28,36 @@ class DebertaSlidingWindowClassifier(nn.Module):
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
+        batch_indices: torch.Tensor,
+        batch_size: int,
         return_embeddings: bool = False,
     ) -> torch.Tensor:
-        # Shapes: [batch_size, num_chunks, seq_len]
-        batch_size, num_chunks, seq_len = input_ids.shape
+        # input_ids shape: [Total_Real_Chunks_In_Batch, seq_len]
+        # attention_mask shape: [Total_Real_Chunks_In_Batch, seq_len]
 
-        # Flatten [batch_size, num_chunks] into single dimension for parallel GPU computation
-        flat_input_ids = input_ids.view(-1, seq_len)
-        flat_attention_mask = attention_mask.view(-1, seq_len)
-
-        # Single Parallel Forward Pass
+        # 1. Single parallel forward pass over ONLY real chunks
         outputs = self.deberta(
-            input_ids=flat_input_ids, attention_mask=flat_attention_mask
+            input_ids=input_ids, attention_mask=attention_mask
         )
 
-        # Extract [CLS] token embeddings: [batch_size * num_chunks, hidden_size]
-        chunk_embeddings = outputs.last_hidden_state[:, 0, :]
+        # 2. Extract [CLS] token representations: [Total_Real_Chunks_In_Batch, hidden_size]
+        cls_embeddings = outputs.last_hidden_state[:, 0, :]
 
-        # Reshape back to [batch_size, num_chunks, hidden_size]
-        chunk_embeddings = chunk_embeddings.view(batch_size, num_chunks, -1)
+        # 3. Max-Pooling across chunks for each email sample in the batch
+        pooled_embeddings = []
+        for b in range(batch_size):
+            sample_mask = batch_indices == b
+            sample_chunk_reps = cls_embeddings[
+                sample_mask
+            ]  # [num_chunks_for_b, hidden_size]
+            sample_pooled, _ = torch.max(sample_chunk_reps, dim=0)
+            pooled_embeddings.append(sample_pooled)
 
-        # Max-Pooling across chunk dimension (dim 1)
-        pooled_embeddings, _ = torch.max(chunk_embeddings, dim=1)
+        pooled_embeddings = torch.stack(
+            pooled_embeddings, dim=0
+        )  # [batch_size, hidden_size]
         pooled_embeddings = self.drop(pooled_embeddings)
 
-        # Return pooled vector for Early Fusion (Exp 4) or logits for Exp 1/3
         if return_embeddings:
             return pooled_embeddings
 
@@ -61,4 +66,4 @@ class DebertaSlidingWindowClassifier(nn.Module):
 
 
 if __name__ == "__main__":
-    print("Flattened DeBERTa-v3 Small model ready!")
+    print("Packed Chunk DeBERTa model ready!")

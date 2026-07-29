@@ -1,4 +1,8 @@
 import os
+import sys
+
+# Ensure repository root is on sys.path for Kaggle / subshell execution
+sys.path.append(os.path.abspath(os.path.dirname(__file__)))
 
 import numpy as np
 import pandas as pd
@@ -9,7 +13,10 @@ from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from src.data.dataset import SlidingWindowPhishingDataset
+from src.data.dataset import (
+    SlidingWindowPhishingDataset,
+    packed_sliding_window_collate_fn,
+)
 from src.models.deberta_model import DebertaSlidingWindowClassifier
 from src.utils.metrics import compute_evaluation_metrics, print_metrics_summary
 
@@ -22,7 +29,7 @@ def main():
 
     print("🚀 Initializing Training Pipeline for Experiment 1...")
 
-    # 2. Dynamic Dataset Path Detection (Kaggle GPU vs. Local CPU)
+    # 2. Path Resolution
     if os.path.exists(config["data"]["kaggle_parquet"]):
         data_path = config["data"]["kaggle_parquet"]
         print(f"📦 Kaggle Environment Detected! Path: {data_path}")
@@ -31,10 +38,10 @@ def main():
         print(f"💻 Local Environment Detected! Path: {data_path}")
     else:
         raise FileNotFoundError(
-            f"❌ Parquet file not found at local or Kaggle paths!"
+            "❌ Parquet file not found at local or Kaggle paths!"
         )
 
-    # 3. Load Dataset & Train/Val Split
+    # 3. Load Dataset & Stratified Split
     df = pd.read_parquet(data_path)
     print(f"✅ Loaded {len(df)} total email records.")
 
@@ -47,7 +54,7 @@ def main():
     print(f"  ├─ Training samples:   {len(train_df)}")
     print(f"  └─ Validation samples: {len(val_df)}")
 
-    # 4. Instantiate Datasets & DataLoaders
+    # 4. Instantiate Datasets & DataLoaders with Packed Chunk Collate
     cfg_deb = config["deberta"]
 
     train_dataset = SlidingWindowPhishingDataset(
@@ -72,6 +79,7 @@ def main():
         shuffle=True,
         num_workers=2 if torch.cuda.is_available() else 0,
         pin_memory=True if torch.cuda.is_available() else False,
+        collate_fn=packed_sliding_window_collate_fn,
     )
 
     val_loader = DataLoader(
@@ -80,6 +88,7 @@ def main():
         shuffle=False,
         num_workers=2 if torch.cuda.is_available() else 0,
         pin_memory=True if torch.cuda.is_available() else False,
+        collate_fn=packed_sliding_window_collate_fn,
     )
 
     # 5. Device Setup & Model Initialization
@@ -97,8 +106,7 @@ def main():
     )
     criterion = nn.CrossEntropyLoss()
 
-    # Mixed Precision Scaler for fast CUDA forward/backward passes
-    scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda"))
+    scaler = torch.amp.GradScaler("cuda", enabled=(device.type == "cuda"))
 
     # 6. Training Loop
     epochs = cfg_deb["epochs"]
@@ -113,12 +121,19 @@ def main():
         for batch in pbar:
             input_ids = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
+            batch_indices = batch["batch_indices"].to(device)
             labels = batch["label"].to(device)
+            batch_size = batch["batch_size"]
 
             optimizer.zero_grad()
 
-            with torch.cuda.amp.autocast(enabled=(device.type == "cuda")):
-                logits = model(input_ids, attention_mask)
+            with torch.amp.autocast("cuda", enabled=(device.type == "cuda")):
+                logits = model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    batch_indices=batch_indices,
+                    batch_size=batch_size,
+                )
                 loss = criterion(logits, labels)
 
             scaler.scale(loss).backward()
@@ -131,7 +146,7 @@ def main():
         epoch_loss = running_loss / len(train_loader)
         print(f"  └─ Average Training Loss: {epoch_loss:.4f}")
 
-        # 7. Validation Evaluation Loop
+        # 7. Validation Loop
         model.eval()
         val_preds, val_probs, val_targets = [], [], []
 
@@ -139,10 +154,17 @@ def main():
             for batch in tqdm(val_loader, desc="Validating"):
                 input_ids = batch["input_ids"].to(device)
                 attention_mask = batch["attention_mask"].to(device)
+                batch_indices = batch["batch_indices"].to(device)
                 labels = batch["label"]
+                batch_size = batch["batch_size"]
 
-                with torch.cuda.amp.autocast(enabled=(device.type == "cuda")):
-                    logits = model(input_ids, attention_mask)
+                with torch.amp.autocast("cuda", enabled=(device.type == "cuda")):
+                    logits = model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        batch_indices=batch_indices,
+                        batch_size=batch_size,
+                    )
                     probs = torch.softmax(logits, dim=-1)[:, 1]
                     preds = torch.argmax(logits, dim=-1)
 
@@ -150,7 +172,7 @@ def main():
                 val_probs.extend(probs.cpu().numpy())
                 val_targets.extend(labels.numpy())
 
-        # 8. Compute and Display Metrics
+        # 8. Compute Metrics & Print Summary
         metrics = compute_evaluation_metrics(
             y_true=np.array(val_targets),
             y_pred=np.array(val_preds),
