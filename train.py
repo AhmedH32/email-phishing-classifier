@@ -18,11 +18,15 @@ from src.data.dataset import (
     packed_sliding_window_collate_fn,
 )
 from src.models.deberta_model import DebertaSlidingWindowClassifier
-from src.utils.metrics import compute_evaluation_metrics, print_metrics_summary
+from src.utils.metrics import (
+    compute_evaluation_metrics,
+    print_metrics_summary,
+    save_experiment_artifacts,
+)
 
 
 def main():
-    # 1. Load Central Config
+    # 1. Load Config
     config_path = "configs/config.yaml"
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
@@ -106,9 +110,14 @@ def main():
     )
     criterion = nn.CrossEntropyLoss()
 
-    # 6. Training Loop (Standard FP32 for DeBERTa Stability)
+    # 6. Training Loop & History Tracking
     epochs = cfg_deb["epochs"]
     best_f1 = 0.0
+
+    history = {"train_loss": [], "val_loss": [], "val_f1": []}
+
+    latest_val_targets, latest_val_preds, latest_val_probs = [], [], []
+    latest_metrics = {}
 
     for epoch in range(epochs):
         print(f"\n================ Epoch {epoch + 1}/{epochs} ================")
@@ -139,11 +148,13 @@ def main():
             running_loss += loss.item()
             pbar.set_postfix({"batch_loss": f"{loss.item():.4f}"})
 
-        epoch_loss = running_loss / len(train_loader)
-        print(f"  └─ Average Training Loss: {epoch_loss:.4f}")
+        epoch_train_loss = running_loss / len(train_loader)
+        history["train_loss"].append(epoch_train_loss)
+        print(f"  └─ Average Training Loss: {epoch_train_loss:.4f}")
 
         # 7. Validation Loop
         model.eval()
+        val_running_loss = 0.0
         val_preds, val_probs, val_targets = [], [], []
 
         with torch.no_grad():
@@ -151,7 +162,7 @@ def main():
                 input_ids = batch["input_ids"].to(device)
                 attention_mask = batch["attention_mask"].to(device)
                 batch_indices = batch["batch_indices"].to(device)
-                labels = batch["label"]
+                labels = batch["label"].to(device)
                 batch_size = batch["batch_size"]
 
                 logits = model(
@@ -160,30 +171,56 @@ def main():
                     batch_indices=batch_indices,
                     batch_size=batch_size,
                 )
+                loss = criterion(logits, labels)
+                val_running_loss += loss.item()
+
                 probs = torch.softmax(logits, dim=-1)[:, 1]
                 preds = torch.argmax(logits, dim=-1)
 
                 val_preds.extend(preds.cpu().numpy())
                 val_probs.extend(probs.cpu().numpy())
-                val_targets.extend(labels.numpy())
+                val_targets.extend(labels.cpu().numpy())
 
-        # 8. Metrics & Checkpointing
+        epoch_val_loss = val_running_loss / len(val_loader)
+        history["val_loss"].append(epoch_val_loss)
+
+        # 8. Metrics Evaluation
         metrics = compute_evaluation_metrics(
             y_true=np.array(val_targets),
             y_pred=np.array(val_preds),
             y_prob=np.array(val_probs),
         )
 
+        history["val_f1"].append(metrics["f1"])
         print_metrics_summary(
             f"Exp 1: DeBERTa Text-Only (Epoch {epoch + 1})", metrics
         )
 
+        latest_val_targets = np.array(val_targets)
+        latest_val_preds = np.array(val_preds)
+        latest_val_probs = np.array(val_probs)
+        latest_metrics = metrics
+
+        # 9. Model Checkpointing
         if metrics["f1"] > best_f1:
             best_f1 = metrics["f1"]
-            os.makedirs("models", exist_ok=True)
-            checkpoint_path = "models/best_deberta_exp1.pt"
+            os.makedirs(config["outputs"]["model_dir"], exist_ok=True)
+            checkpoint_path = os.path.join(
+                config["outputs"]["model_dir"], "best_deberta_exp1.pt"
+            )
             torch.save(model.state_dict(), checkpoint_path)
             print(f"💾 Saved new best model checkpoint to {checkpoint_path}")
+
+    # 10. Save Artifacts (Plots & JSON)
+    print("\n📊 Generating Experiment 1 Evaluation Plots & Logs...")
+    save_experiment_artifacts(
+        output_dir=config["outputs"]["results_dir"],
+        history=history,
+        final_metrics=latest_metrics,
+        y_true=latest_val_targets,
+        y_pred=latest_val_preds,
+        y_prob=latest_val_probs,
+    )
 
 
 if __name__ == "__main__":
