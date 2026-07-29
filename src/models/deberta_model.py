@@ -6,8 +6,7 @@ from transformers import AutoConfig, AutoModel
 class DebertaSlidingWindowClassifier(nn.Module):
     """DeBERTa-v3 architecture with Chunk Sub-Batching & Max-Pooling.
 
-    Caps simultaneous chunk evaluations to max 16 per CUDA pass to guarantee
-    bounded VRAM usage regardless of batch size.
+    Caps simultaneous chunk evaluations to max 8 per CUDA pass (~7-8 GB VRAM peak).
     """
 
     def __init__(
@@ -15,7 +14,7 @@ class DebertaSlidingWindowClassifier(nn.Module):
         model_name: str = "microsoft/deberta-v3-small",
         num_classes: int = 2,
         dropout: float = 0.2,
-        max_chunk_sub_batch: int = 16,
+        max_chunk_sub_batch: int = 8,  # <-- CHANGED FROM 16 TO 8
     ):
         super().__init__()
         self.config = AutoConfig.from_pretrained(model_name)
@@ -37,7 +36,7 @@ class DebertaSlidingWindowClassifier(nn.Module):
         total_chunks = input_ids.size(0)
         cls_embeddings_list = []
 
-        # Sub-batch chunks in safe slices (max 16 chunks per CUDA forward pass)
+        # Sub-batch chunks in safe slices (max 8 chunks per CUDA forward pass)
         for i in range(0, total_chunks, self.max_chunk_sub_batch):
             sub_ids = input_ids[i : i + self.max_chunk_sub_batch]
             sub_mask = attention_mask[i : i + self.max_chunk_sub_batch]
