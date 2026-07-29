@@ -1,5 +1,8 @@
-# Datasets and Data Folders
-data/
+# Ignore ONLY the root data/ dataset folder
+/data/
+!src/data/
+
+# Ignore raw data files everywhere
 *.csv
 *.parquet
 
